@@ -1,0 +1,42 @@
+**MVP**
+
+[x] Zoom on point.
+[ ] Undo and Redo.
+[ ] Add limits to pan.
+[x] Handle resizing.
+[x] Get 2-3 lines of text rendering correctly and cutting off after.
+[x] Handle hover / active states.
+[ ] Get icon rendering.
+[x] Render multiple roots.
+[x] Render children.
+[x] Render arrows.
+[x] Disable drag when on item.
+[x] Handle mouse positions w/ pan.
+[x] Handle mouse positions w/ zoom.
+[x] Have surface move rather then shadow.
+[x] Fix laggy shadow. (turns out it was a accidental fill applied to stroke).
+[ ] Done item styling.
+[ ] Have items flip to done when clicked.
+[ ] Add item addition button.
+[ ] Add item addition dialog.
+[ ] Add item deletion button.
+[ ] Add item deletion dialog.
+[ ] Add zero state for adding first item
+[ ] Add ui for adding root items.
+[ ] Some items hover box is offset.
+
+**MLP**
+
+[ ] Add additional fields
+    [ ] Long description
+    [ ] Tags
+    [ ] Have color of item customizable.
+    [ ] Add modal to view all this information
+[ ] Auto zoom out to fit whole tree on screen?
+[ ] Animate between hover/active states.
+[ ] On hover make the the outgoing arrows light red
+    [ ] Animate the red from the start of the arrow to the end like a pipe :O
+[ ] Once done make outgoing arrows dark red.
+
+**Low impact bugs**
+[ ] Text wrapping is non deterministic for some reason...
