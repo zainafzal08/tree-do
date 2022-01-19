@@ -1,251 +1,30 @@
-import { ItemColorPalette, PointerContext, TodoItem } from "./data_types";
-import { IS_DEBUG } from "./debug";
-import { Vector } from "./vector";
+import { colorInterp, drawBox, LAYOUT, linearInterp, TIMINGS, toRadians, wrapText } from './drawing_helpers';
+import { TodoItem } from './data_types';
+import { BaseNode } from './node';
+import { Vector } from './vector';
 
-/**
- * Note that these values are in canvas coordinates which are not 1:1 with
- * screen pixels. Each one is adjusted by a RESOLUTION_MULTIPLIER in canvas.ts
- * which maps multiple canvas pixels to each real screen pixel to reduce
- * blurryness.
- */
-const LAYOUT = {
-  box: {
-    borderRadius: 16,
-    defaultShadowOffset: 8,
-    hoverShadowOffset: 12,
-    activeShadowOffset: 4,
-    minWidth: 400,
-    fontSize: 28,
-    lineBreakHeight: 4,
-    // |<h_pad><text_width><between_pad><icon_width><h_pad>|<connector_pad>o-->
-    hPadding: 24,
-    vPadding: 32,
-    textWidth: 256,
-    betweenPadding: 64,
-    iconWidth: 28,
-    connectorPadding: 32,
-  },
-  verticalItemPadding: 64,
-  horizontalItemPadding: 164,
-};
-
-const COLORS: ItemColorPalette = {
-  fillColor: "#FFD9D9",
-  strokeColor: "#E24646",
-  shadowColor: "#E24646",
-  textColor: "#E24646",
-  connectorColor: "#DEDEDE"
-};
-
-// https://stackoverflow.com/questions/1255512/how-to-draw-a-rounded-rectangle-using-html-canvas
-function drawBox(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number
-) {
-  if (w < 2 * r) r = w / 2;
-  if (h < 2 * r) r = h / 2;
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+interface ItemAnimation {
+  startTime: number;
+  endTime: number;
+  startState: 'active' | 'hover' | undefined;
+  endState: 'active' | 'hover' | undefined;
 }
 
-/**
- * Wraps `text` so it never extends past `maxWidth`. Adds line breaks after
- * words. Likely to break if maxWidth is too small. Will add an ellipse if text
- * extends past 3 lines.
- */
-function wrapText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  maxWidth: number
-) {
-  const { fontSize } = LAYOUT.box;
-  ctx.font = `${fontSize}px 'Ubuntu'`;
-  const tokens = [];
-  // Do a quick pass and break any words that are longer then maxWidth.
-  for (const token of text.split(" ")) {
-    if (token.length <= maxWidth) {
-      tokens.push(token);
-    } else {
-      let word = token;
-      while (word.length > maxWidth) {
-        tokens.push(word.substr(0, maxWidth - 1) + "-");
-        word = word.substr(maxWidth - 1);
-      }
-    }
-  }
-  const lines = [];
-  let currLine = "";
-  while (tokens.length > 0) {
-    const token = tokens.shift();
-    if (lines.length === 3) {
-      break;
-    }
-    const proposedLine = currLine !== "" ? `${currLine} ${token}` : token;
-    if (ctx.measureText(proposedLine).width > maxWidth) {
-      lines.push(currLine);
-      currLine = token;
-    } else {
-      currLine = proposedLine;
-    }
-  }
-  lines.push(currLine);
-
-  if (lines.length >= 3 || tokens.length > 0) {
-    let trailingLine = lines[2];
-    while (ctx.measureText(trailingLine + "...").width > maxWidth) {
-      trailingLine = trailingLine.substr(0, trailingLine.length - 1);
-    }
-    lines[2] = trailingLine + "...";
-  }
-  return lines.slice(0, 3);
-}
-
-export class TodoNode {
-  private root = false;
-  private children: TodoNode[] = [];
-  private cachedLines: string[] | null = null;
-  private calculationCache = new Map<string, number>();
-
-  id: string;
+export class TodoNode extends BaseNode {
   text: string;
   done: boolean;
   /** Unix timestamp */
   creationTime: number;
 
-  constructor(item: TodoItem | null) {
-    if (!item) {
-      this.root = true;
-      this.id = "__ROOT_NODE__";
-      return;
-    }
+  private lastState: 'hover' | 'active' | undefined = undefined;
+  private runningAnimation: ItemAnimation|null = null;
+
+  constructor(item: TodoItem) {
+    super();
     this.id = item.id;
     this.text = item.text;
     this.done = item.done;
     this.creationTime = item.creationTime;
-  }
-
-  addChild(node: TodoNode) {
-    this.children.push(node);
-  }
-
-  dropChild(id: string) {
-    this.children = this.children.filter((child) => child.id !== id);
-  }
-
-  dropAllChildren() {
-    const cpy = this.children;
-    this.children = [];
-    return cpy;
-  }
-
-  getChildren() {
-    return this.children;
-  }
-
-  // TODO: move rendering logic into a seperate class so we seperate model and
-  // view more cleanly.
-
-  /**
-   * Draws this node and it's children. `x` and `y` spexify the top left
-   * position of the bounding box of the whole tree.
-   */
-  draw(
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    pointerContext: PointerContext
-  ) {
-    let pointerOverItem = false;
-    let state = undefined;
-    const totalHeight = this.getTotalHeight(ctx);
-    const myDimentions = this.getDimentionsOnCanvas(ctx);
-    const myPosition = new Vector(
-      x,
-      y + totalHeight / 2 - myDimentions.height / 2
-    );
-    if (
-      pointerContext.position?.isInBox(
-        myPosition.x,
-        myPosition.y,
-        myDimentions.width,
-        myDimentions.height
-      )
-    ) {
-      pointerOverItem = true;
-      state = pointerContext.pressed ? "active" : "hover";
-    }
-    this.drawMyself(ctx, myPosition.x, myPosition.y, state);
-    if (IS_DEBUG) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(myPosition.x, myPosition.y, myDimentions.width, myDimentions.height);
-      ctx.strokeStyle = 'blue';
-      ctx.stroke();
-      ctx.restore();
-    }
-    // Render children.
-    let childY = y;
-    // List of the middle left point on each child, used to draw our arrows
-    // between items.
-    const childrenPositions:Vector[] = [];
-    for (const child of this.children) {
-      const childHeight = child.getTotalHeight(ctx);
-      const myWidth = this.getDimentionsOnCanvas(ctx).width;
-      const childX = x + myWidth + LAYOUT.horizontalItemPadding;
-      childrenPositions.push(new Vector(
-        childX,
-        childY + childHeight/2
-      ));
-      const childHasPointer = child.draw(
-        ctx,
-        childX,
-        childY,
-        pointerContext
-      );
-      if (childHasPointer) {
-        pointerOverItem = true;
-      }
-      childY += childHeight + LAYOUT.verticalItemPadding;
-    }
-
-    const fromX = x + myDimentions.width + LAYOUT.box.connectorPadding;
-    const fromY = y + totalHeight/2;
-    this.drawConnections(ctx, fromX, fromY, childrenPositions);
-    return pointerOverItem;
-  }
-
-  getTotalHeight(ctx: CanvasRenderingContext2D) {
-    if (this.calculationCache.has("totalHeight")) {
-      return this.calculationCache.get("totalHeight");
-    }
-    let totalHeight;
-    if (this.children.length > 0) {
-      totalHeight =
-        this.children.reduce(
-          (acc, child) => acc + child.getTotalHeight(ctx),
-          0
-        ) +
-        (this.children.length - 1) * LAYOUT.verticalItemPadding;
-    } else {
-      totalHeight = this.getDimentionsOnCanvas(ctx).height;
-    }
-    this.calculationCache.set("totalHeight", totalHeight);
-    return totalHeight;
-  }
-
-  getTotalWidth(ctx: CanvasRenderingContext2D) {
-    // TODO: consider children.
-    // TODO: cache this value, it's needed often.
-    return this.getDimentionsOnCanvas(ctx).width;
   }
 
   getDimentionsOnCanvas(ctx: CanvasRenderingContext2D) {
@@ -259,13 +38,7 @@ export class TodoNode {
       lineBreakHeight,
       vPadding,
     } = LAYOUT.box;
-    if (this.root) {
-      return {
-        width: 0,
-        height: 0,
-      };
-    }
-    const lines = this.getLines(ctx);
+    const lines = wrapText(ctx, this.text, LAYOUT.box.textWidth, LAYOUT.box.fontSize);
     const textBoxHeight =
       lines.length * fontSize + lineBreakHeight * (lines.length - 1);
     const height = textBoxHeight + 2 * vPadding;
@@ -279,66 +52,204 @@ export class TodoNode {
     };
   }
 
-  private drawConnections(ctx: CanvasRenderingContext2D, fromX: number, fromY: number, childrenPositions: Vector[]) {
-    if (childrenPositions.length === 0) {
-      return
-    }
-    const connectorRadius = 6;
-    const arrowHeadHeight = 16;
-    const landingZoneLength = 32;
-    ctx.beginPath();
-    ctx.fillStyle = COLORS.connectorColor;
-    ctx.lineWidth = 4;
-    ctx.ellipse(
-      fromX,
-      fromY,
-      connectorRadius,
-      connectorRadius,
-      0,
-      0,
-      360
-    );
-    ctx.fill();
-    ctx.closePath();
-
-    const startX = fromX;
-    const startY = fromY;
-    for (const child of childrenPositions) {
-      const toX = child.x - LAYOUT.box.connectorPadding;
-      const toY = child.y;
-      ctx.beginPath();
-      ctx.strokeStyle = COLORS.connectorColor;
-      ctx.moveTo(startX, startY);
-      ctx.lineTo(toX-landingZoneLength, toY);
-      ctx.lineTo(toX, toY);
-      ctx.stroke();
-
-      ctx.fillStyle = COLORS.connectorColor;
-      ctx.beginPath();
-      ctx.moveTo(toX, toY - arrowHeadHeight/2);
-      ctx.lineTo(toX + arrowHeadHeight, toY);
-      ctx.lineTo(toX, toY + arrowHeadHeight/2);
-      ctx.closePath();
-      ctx.fill();
-    }
+  getOutgoingConnectorColor() {
+    return "#DEDEDE";
   }
 
-  private drawItem(
+  private getColors(state?: 'hover' | 'active') {
+    const colors = {
+      fillColor: "#FFD9D9",
+      strokeColor: "#E24646",
+      shadowColor: "#E24646",
+      textColor: "#E24646",
+      checkCircleStroke: "#E24646"
+    };
+    
+    if (this.runningAnimation) {
+      const {endState, startTime, endTime} = this.runningAnimation;
+      const p = (Date.now() - startTime) / (endTime - startTime);
+
+      if (!this.done && endState === 'active') {
+        const fillColor = colorInterp("#FFD9D9", "#E76868", p);
+        const strokeColor = colorInterp("#E24646", "#E76868", p);
+        const textColor = colorInterp("#E24646", "#FFFFFF", p);
+        const checkCircleStroke = colorInterp("#E24646", "#FFFFFF", p);
+
+        return {
+          ...colors,
+          fillColor: fillColor,
+          strokeColor: strokeColor,
+          textColor: textColor,
+          checkCircleStroke: checkCircleStroke
+        };
+      } else if (this.done && endState === 'active') {
+        const fillColor = colorInterp("#E76868", "#FFD9D9", p);
+        const strokeColor = colorInterp("#E76868", "#E24646", p);
+        const textColor = colorInterp("#FFFFFF", "#E24646", p);
+        const checkCircleStroke = colorInterp("#FFFFFF", "#E24646", p);
+
+        return {
+          ...colors,
+          fillColor: fillColor,
+          strokeColor: strokeColor,
+          textColor: textColor,
+          checkCircleStroke: checkCircleStroke
+        };
+      }
+    }
+    
+    if (!this.done && state === 'active') {
+      return {
+        ...colors,
+        fillColor: '#E76868',
+        strokeColor: '#E76868',
+        textColor: 'white',
+        checkCircleStroke: 'white'
+      };
+    }
+    
+    if (this.done && state !== 'active') {
+      return {
+        ...colors,
+        fillColor: '#E76868',
+        strokeColor: '#E76868',
+        textColor: 'white',
+        checkCircleStroke: 'white'
+      };
+    }
+  
+    return colors;
+  }
+  
+  private getShadowOffset(state: 'hover' | 'active' | undefined) {
+    const {
+      defaultShadowOffset,
+      hoverShadowOffset,
+      activeShadowOffset
+    } = LAYOUT.box;
+    let shadowOffset = defaultShadowOffset;
+    if (this.runningAnimation) {
+      const {startState, endState, startTime, endTime} = this.runningAnimation;
+      let startOffset = defaultShadowOffset;
+      let endOffset = defaultShadowOffset;
+      if (startState === 'hover') {
+        startOffset = hoverShadowOffset;
+      } else if (startState === 'active') {
+        startOffset = activeShadowOffset;
+      }
+      if (endState === 'hover') {
+        endOffset = hoverShadowOffset;
+      } else if (endState === 'active') {
+        endOffset = activeShadowOffset;
+      }
+      const p = (Date.now() - startTime) / (endTime - startTime);
+      shadowOffset = linearInterp(startOffset, endOffset, p)
+    } else if (state === "hover") {
+      shadowOffset = hoverShadowOffset;
+    } else if (state === "active") {
+      shadowOffset = activeShadowOffset;
+    }
+    return shadowOffset;
+  }
+
+  private drawTick(ctx: CanvasRenderingContext2D, x: number, y: number, state?: 'active' | 'hover') {
+    const {textWidth, betweenPadding, iconWidth, hPadding, vPadding} = LAYOUT.box;
+    const centerX = x + hPadding + textWidth + betweenPadding + iconWidth/2;
+    const centerY = y + vPadding + iconWidth/2;
+    ctx.strokeStyle = this.getColors(state).checkCircleStroke;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+
+    let circleRotation = 0;
+    let circleEndAngle = 2*Math.PI;
+    let tickPercentage = 0;
+    let animated = false;
+
+    if (this.runningAnimation) {
+      const {startTime, endTime, startState, endState} = this.runningAnimation;
+      const p = Math.min((Date.now() - startTime) / (endTime - startTime), 1);
+      let animating: 'in'|'out'|null = null;
+
+      if (this.done) {
+        if (startState === 'hover' && endState === undefined) {
+          animating = 'in';
+        } else if (startState === 'active' && endState === undefined) {
+          animating = 'in';
+        } else if (startState === undefined && endState !== undefined) {
+          animating = 'out';
+        }
+      }
+
+      if (!this.done) {
+        if (startState === 'hover' && endState === undefined) {
+          animating = 'out';
+        } else if (startState === 'active' && endState === undefined) {
+          animating = 'out';
+        } else if (startState === undefined && endState !== undefined) {
+          animating = 'in';
+        }
+      }
+
+      if (animating === 'in') {
+        tickPercentage = p;
+        animated = true;
+      } else if (animating === 'out') {
+        tickPercentage = 1 - p;
+        animated = true;
+      }
+    }
+    
+    if ((this.done && state === undefined) || (!this.done && state !== undefined)) {
+      circleRotation = toRadians(-17);
+      circleEndAngle = toRadians(320);
+      if (!animated) {
+        tickPercentage = 1;
+      }
+    }
+
+    ctx.ellipse(centerX, centerY, 16, 16, circleRotation, 0, circleEndAngle);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.lineWidth = 4;
+    let p = new Vector(centerX - 7, centerY);
+    ctx.moveTo(p.x, p.y);
+    // Total length of path is x:20 y:18
+    const path = (new Vector(20, 18)).mult(tickPercentage);
+    if (path.x > 0 && path.y > 0) {
+      ctx.lineTo(p.x + Math.min(path.x, 5), p.y + Math.min(path.y, 5));
+    }
+    if (path.x >= 5 && path.y >= 5) {
+      ctx.lineTo(centerX + Math.min(path.x-5, 15), centerY - Math.min(path.y-5, 13));
+    }
+    ctx.stroke();
+  }
+
+  /** Draw this node on screen with it's top left point at x, y. */
+  drawMyself(
     ctx: CanvasRenderingContext2D,
     x: number,
     y: number,
     state?: "hover" | "active"
   ) {
+		if (this.lastState != state) {
+      this.runningAnimation = {
+        startTime: Date.now(),
+        endTime: Date.now() + TIMINGS.itemRaiseDuration,
+        startState: this.lastState, 
+        endState: state,
+      };
+      setTimeout(() => {this.runningAnimation = null}, TIMINGS.itemRaiseDuration+5)
+      this.lastState = state;
+    }
+
     const {
       borderRadius,
-      defaultShadowOffset,
-      hoverShadowOffset,
-      activeShadowOffset,
       hPadding,
       fontSize,
       lineBreakHeight,
       vPadding,
     } = LAYOUT.box;
+    const colors = this.getColors(state);
     ctx.save();
     if (this.text.length < 1) {
       ctx.restore();
@@ -346,19 +257,13 @@ export class TodoNode {
     }
 
     const { width, height } = this.getDimentionsOnCanvas(ctx);
-    let shadowOffset = defaultShadowOffset;
-    if (state === "hover") {
-      shadowOffset = hoverShadowOffset;
-    } else if (state === "active") {
-      shadowOffset = activeShadowOffset;
-    }
+    const shadowOffset = this.getShadowOffset(state);
     // We draw the actual box a bit offset depending on the elevation we are
     // aiming for. This does mean the bounding rect returned by
     // getDimentionsOnCanvas is slightly off since it assumes there is no shadow
     // but it still gets the job done for any layout applications.
     x -= shadowOffset;
     y -= shadowOffset;
-
     drawBox(
       ctx,
       x + shadowOffset,
@@ -367,44 +272,29 @@ export class TodoNode {
       height,
       borderRadius
     );
-    ctx.fillStyle = COLORS.shadowColor;
+    ctx.fillStyle = colors.shadowColor;
     ctx.fill();
     drawBox(ctx, x, y, width, height, borderRadius);
-    ctx.fillStyle = COLORS.fillColor;
-    ctx.strokeStyle = COLORS.strokeColor;
+    ctx.fillStyle = colors.fillColor;
+    ctx.strokeStyle = colors.strokeColor;
     ctx.lineWidth = 2;
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = COLORS.textColor;
-    ctx.font = `${fontSize}px 'Ubuntu'`;
+    // Render text box.
     let currLinePos = { x: x + hPadding, y: y + fontSize + vPadding };
-    for (const line of this.getLines(ctx)) {
+    const lines = wrapText(ctx, this.text, LAYOUT.box.textWidth, LAYOUT.box.fontSize);
+    for (const line of lines) {
+      ctx.fillStyle = colors.textColor;
+      ctx.font = `${fontSize}px 'Ubuntu'`;
+      ctx.textBaseline = 'alphabetic';
+      ctx.textAlign = 'start';
       ctx.fillText(line, currLinePos.x, currLinePos.y);
       currLinePos.y += fontSize + lineBreakHeight;
     }
+
+    // Render tick.
+    this.drawTick(ctx, x, y, state);
     ctx.restore();
-  }
-
-  /** Draw this todo item on screen with it's top left point at x, y. */
-  private drawMyself(
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    state?: "hover" | "active"
-  ) {
-    if (!this.root) {
-      this.drawItem(ctx, x, y, state);
-    }
-  }
-
-  /** Returns the text for this node as an array of wrapped lines. */
-  private getLines(ctx: CanvasRenderingContext2D) {
-    if (this.cachedLines) {
-      // Avoid rewrapping the text on each frame if we can.
-      return this.cachedLines;
-    }
-    this.cachedLines = wrapText(ctx, this.text, LAYOUT.box.textWidth);
-    return this.cachedLines;
   }
 }

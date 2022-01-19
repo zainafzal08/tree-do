@@ -1,12 +1,11 @@
 **MVP**
 
+_Core_
+
 [x] Zoom on point.
-[ ] Undo and Redo.
-[ ] Add limits to pan.
 [x] Handle resizing.
 [x] Get 2-3 lines of text rendering correctly and cutting off after.
 [x] Handle hover / active states.
-[ ] Get icon rendering.
 [x] Render multiple roots.
 [x] Render children.
 [x] Render arrows.
@@ -15,28 +14,62 @@
 [x] Handle mouse positions w/ zoom.
 [x] Have surface move rather then shadow.
 [x] Fix laggy shadow. (turns out it was a accidental fill applied to stroke).
-[ ] Done item styling.
-[ ] Have items flip to done when clicked.
-[ ] Add item addition button.
-[ ] Add item addition dialog.
-[ ] Add item deletion button.
-[ ] Add item deletion dialog.
-[ ] Add zero state for adding first item
-[ ] Add ui for adding root items.
-[ ] Some items hover box is offset.
+[x] Done item styling.
+[x] Have items flip to done when clicked.
+[x] Add item addition button.
+[x] Add item addition dialog.
+[x] Add item deletion button.
+[x] Add item delection logic.
+[x] Some items hover box is offset.
+[X] Fix bug where adding/deleting nodes leads to weird rendering.
+[X] Add root item w/ project name.
+[X] Add ability to add/delete to the root node.
+[ ] Add limits to pan.
+[ ] Undo and Redo.
+
+_Projects_
+[ ] Add ability to add new projects.
+[ ] Add ability to remove projects.
+[ ] Add ability to switch between projects.
+
+_Save/Recall_
+[X] implement save()
+[X] implement fetch()
+[ ] Add UI to show when changes have been synced.
+[ ] Add UI for when running in offline mode.
+[ ] Add flow for logging in.
+[ ] implement downsync()
+[ ] implement upsync()
+
+_Bugs_
+[ ] Maybe use https://github.com/jonschlinkert/word-wrap ?
+    [ ] Handle long word text wrapping.
+    [ ] Handle 3rd line after text wrapping cutting off weirdly early.
 
 **MLP**
 
 [ ] Add additional fields
     [ ] Long description
     [ ] Tags
-    [ ] Have color of item customizable.
     [ ] Add modal to view all this information
 [ ] Auto zoom out to fit whole tree on screen?
-[ ] Animate between hover/active states.
+[X] Animate between hover/active states.
 [ ] On hover make the the outgoing arrows light red
     [ ] Animate the red from the start of the arrow to the end like a pipe :O
 [ ] Once done make outgoing arrows dark red.
+[ ] Let users drag items around.
+[X] Animate the tick.
+[ ] Let projects have different color schemes.
+[ ] Make parents of ticked items flip (maybe make it a setting)
+[ ] Have a shareable view which is read only.
+[ ] Make undos/redos persist in local storage?
+
+**Other**
+
+[ ] Piviot to svg/html instead of canvas for better css animations + a11y?
+[ ] Move the web UI into neat lit components.
+[X] Fix typing issue with setTimeout. 
+[ ] Refactor model and view to be seperate for canvas.
 
 **Low impact bugs**
 [ ] Text wrapping is non deterministic for some reason...

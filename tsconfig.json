@@ -4,9 +4,11 @@
     ],
     "compilerOptions": {
         "esModuleInterop": true,
+        "experimentalDecorators": true,
         "lib": [
-            "es2015",
             "dom"
-        ]
+        ],
+        "target": "ES6",
+        "moduleResolution": "Node"
     }
 }

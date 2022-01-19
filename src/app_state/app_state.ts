@@ -1,15 +1,18 @@
-import localforage from "localforage";
-import { Mutation, TodoItem } from "../data_types";
+import { Mutation, Project, SerializedItem, SerializedProject, SerializedState, TodoItem } from "../data_types";
+import { BaseNode } from "../node";
+import { RootNode } from "../root_node";
 import { TodoNode } from "../todo_node";
+import { v4 as uuidv4 } from "uuid";
+import { PersistantStorageManager } from "./persistant_storage";
 
 const MAX_UNDO_QUEUE_LENGTH = 100;
 
-function bfs(startQueue: TodoNode[]) {
-  const queue = startQueue;
+function bfs(startQueue: BaseNode[]) {
+  const queue = [...startQueue];
   const visited = new Set();
   const result = [];
   while (queue.length > 0) {
-    const curr = queue.pop();
+    const curr = queue.shift();
     result.push(curr);
     for (const child of curr.getChildren()) {
       if (!visited.has(child.id)) {
@@ -19,6 +22,39 @@ function bfs(startQueue: TodoNode[]) {
     }
   }
   return result;
+}
+
+function deserializeProject(p: SerializedProject):Project {
+  let rootNode = new RootNode(p.name);
+  const todoItemLookup = new Map<string, TodoNode>();
+  const todoItemParentLookup = new Map<string, BaseNode>();
+  // Set up todoItemLookup and convert all items into nodes.
+  for (const item of p.items) {
+    todoItemLookup.set(item.id, new TodoNode(item));
+  }
+  // Set up root node.
+  for (const childId of p.rootChildren) {
+    const childNode = todoItemLookup.get(childId)
+    rootNode.addChild(childNode);
+    todoItemParentLookup.set(childNode.id, rootNode);
+  }
+  // Set up all other nodes
+  for (const item of p.items) {
+    const node = todoItemLookup.get(item.id);
+    for (const childId of item.children) {
+      const childNode = todoItemLookup.get(childId);
+      node.addChild(childNode);
+      todoItemParentLookup.set(childId, node);
+    }
+  }
+
+  return {
+    id: p.id,
+    name: p.name,
+    rootNode,
+    todoItemLookup,
+    todoItemParentLookup
+  }
 }
 
 /**
@@ -31,37 +67,55 @@ function bfs(startQueue: TodoNode[]) {
  * updating what needs to for a specific mutation.
  */
 export class AppState {
+  currentProjectId: string | null = null;
+  allProjects: Record<string, Project> = {};
+
   private undoQueue: Mutation[] = [];
   private redoQueue: Mutation[] = [];
-  /** List of todo nodes with no parent. */
-  private rootNode: TodoNode = new TodoNode(null);
-  /** Map to speed up finding a node in the tree given an id. */
-  private todoItemLookup = new Map<string, TodoNode>();
-  /** Map to speed up finding a nodes parent in the tree. */
-  private todoItemParentLookup= new Map<string, TodoNode>();
+  private hydrated = false;
+  private persistantStorageManager = new PersistantStorageManager()
 
   /**
    * List of todo items that have been directly or indirectly deleted in the
    * current session. Useful for performing Undos or Redos.
    */
-  private todoItemsTrash = new Map<string, TodoNode>();
+  private todoItemsTrash = new Map<string, BaseNode>();
 
-  getRootNode() {
-    return this.rootNode;
+  get currentProject() {
+    if (!this.currentProjectId) {
+      throw new Error("No project set");
+    }
+    const project = this.allProjects[this.currentProjectId];
+    if (!project) {
+      throw new Error("Invalid current project id");
+    }
+    return project;
   }
 
-  addTodoItem(item: TodoItem, parentId: string | null) {
+  get todoItemLookup() {
+    return this.currentProject.todoItemLookup;
+  }
+
+  get todoItemParentLookup() {
+    return this.currentProject.todoItemParentLookup;
+  }
+
+  getRootNode() {
+    return this.currentProject.rootNode;
+  }
+
+  addTodoItem(item: TodoItem, parentId: string) {
     const newNode = new TodoNode(item);
     let parentNode;
-    if (parentId === null) {
-      parentNode = this.rootNode;
+    if (parentId === "__ROOT__") {
+      parentNode = this.getRootNode();
     } else if (this.todoItemLookup.has(parentId)) {
       parentNode = this.todoItemLookup.get(parentId);
     } else {
       throw new Error("Non-existant parent id supplied");
     }
-
     parentNode.addChild(newNode);
+
     this.todoItemLookup.set(newNode.id, newNode);
     this.todoItemParentLookup.set(newNode.id, parentNode);
 
@@ -73,7 +127,7 @@ export class AppState {
       },
     });
     this.clearRedoQueue();
-    this.upsync();
+    this.save();
   }
 
   removeTodoItem(
@@ -103,13 +157,13 @@ export class AppState {
         this.removeNode(child);
       }
     } else {
-      let target: TodoNode | null;
+      let target: BaseNode;
       if (orphanResolutionStrategy === "mv2root") {
-        target = this.rootNode;
+        target = this.getRootNode();
       } else {
         target = deadNodeParent;
       }
-      
+
       for (const orphan of orphans) {
         target.addChild(orphan);
         this.todoItemParentLookup.set(orphan.id, target);
@@ -118,7 +172,14 @@ export class AppState {
 
     // TODO: update undo queue.
     this.clearRedoQueue();
-    this.upsync();
+    this.save();
+  }
+
+  clearProject() {
+    const allChildrenNodes = bfs(this.getRootNode().getChildren());
+    for (const child of allChildrenNodes) {
+      this.removeNode(child);
+    }
   }
 
   undo() {
@@ -142,43 +203,81 @@ export class AppState {
   }
 
   async hydrate() {
-    // TODO: pull data from local storage.
+    await this.fetch();
+    this.hydrated = true;
+  }
 
-    this.addTodoItem({
-      id: '1',
-      text: 'Learn code',
-      done: false,
-      creationTime: 0
-    }, null);
+  addProject(name: string) {
+    if (!this.hydrated) {
+      throw new Error("App state must be hydrated before mutations.");
+    }
+    const id = uuidv4();
+    this.allProjects[id] = {
+      id,
+      name,
+      rootNode: new RootNode(name),
+      todoItemLookup: new Map(),
+      todoItemParentLookup: new Map(),
+    };
+    this.save();
+  }
 
+  setProject(id: string) {
+    if (!this.hydrated) {
+      throw new Error("App state must be hydrated before mutations.");
+    }
+    const project = this.allProjects[id];
+    if (!project) {
+      throw new Error("Id does not exist");
+    }
+    this.currentProjectId = id;
+  }
 
-    this.addTodoItem({
-      id: '4',
-      text: 'Learn boobies lol',
-      done: false,
-      creationTime: 0
-    }, '1');
+  async downsync() {
+    // TODO: Pull from cloud into localstorage.
+  }
 
-    this.addTodoItem({
-      id: '5',
-      text: 'Learn butts lmao',
-      done: false,
-      creationTime: 0
-    }, '1');
+  upsync() {
+    // TODO: Add a mutation to a cloud queue.
+  }
 
-    this.addTodoItem({
-      id: '2',
-      text: 'Learn computers',
-      done: false,
-      creationTime: 0
-    }, null);
+  async fetch() {
+    const state = await this.persistantStorageManager.getState();
+    if (!state) {
+      return;
+    }
+    this.currentProjectId = state.currentProject;
+    this.allProjects = {};
+    for (const p of state.allProjects.map(p => deserializeProject(p))) {
+      this.allProjects[p.id] = p;
+    }
+  }
 
-    this.addTodoItem({
-      id: '3',
-      text: 'Learn how to do that thing with the thing and the thing',
-      done: false,
-      creationTime: 0
-    }, null);
+  async save() {
+    // For now we serialise our whole state.
+    const allProjects:SerializedProject[] = [];
+    for (const project of Object.values(this.allProjects)) {
+      const rootChildren = project.rootNode.getChildren() as TodoNode[];
+      const items:SerializedItem[] = bfs(rootChildren).map(node => ({
+        id: node.id,
+        text: node.text,
+        done: node.done,
+        creationTime: node.creationTime,
+        children: node.getChildren().map(child => child.id)
+      }));
+      allProjects.push({
+        id: project.id,
+        name: project.name,
+        items,
+        rootChildren: rootChildren.map(child => child.id)
+      });
+    }
+    const state: SerializedState = {
+      version: 1,
+      currentProject: this.currentProjectId,
+      allProjects
+    };
+    this.persistantStorageManager.saveState(state);
   }
 
   /**
@@ -200,7 +299,7 @@ export class AppState {
 
   private dropResourcesForMutation(mutation: Mutation) {
     if (mutation.type === "todo") {
-      for (const removedItem of (mutation.removedItems || [])) {
+      for (const removedItem of mutation.removedItems || []) {
         this.todoItemsTrash.delete(removedItem.itemId);
       }
     }
@@ -212,8 +311,6 @@ export class AppState {
     }
     this.redoQueue = [];
   }
-
-  private upsync() {
-    // TODO: push our local state into localstorage.
-  }
 }
+
+export const appState = new AppState();
